@@ -51,7 +51,7 @@ class TwitterCollector(BaseCollector):
         logger.info(f"Collecting tweets via Apify for {len(self.accounts)} accounts")
 
         # Apify actor run endpoint
-        ACTOR_ID = "apidojo~twitter-scraper"  # Update if using a different actor
+        ACTOR_ID = "kaitoeasyapi~twitter-x-data-tweet-scraper-pay-per-result-cheapest"
         RUN_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs"
 
         try:

@@ -1,72 +1,30 @@
+import hashlib
 import requests
 import logging
+
+from templates.telegram_format import (
+    format_newsletter,
+    format_newsletter_header,
+    format_item_with_buttons,
+    format_linkedin_header,
+    format_single_draft,
+)
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
 
-def _format_message(newsletter: list, analysis: dict = None) -> str:
-    """Format newsletter + analysis into Telegram message."""
-
-    lines = ["*AI Pulse — Weekly Digest*\n"]
-
-    # ── Analysis first (the brain's take) ─────────────────
-    if analysis:
-        theme = analysis.get("weekly_theme", "")
-        if theme:
-            lines.append(f"*This Week's Theme:* {theme}\n")
-
-        connections = analysis.get("connections", "")
-        if connections:
-            lines.append(f"*How It Connects:*\n{connections[:600]}\n")
-
-        implications = analysis.get("implications", {})
-        if implications:
-            lines.append("*Implications:*")
-            for key, label in [("industry", "Industry"), ("economic", "Economic"),
-                               ("geopolitical", "Geopolitical"), ("for_builders", "For Builders")]:
-                val = implications.get(key)
-                if val:
-                    lines.append(f"  {label}: {val}")
-            lines.append("")
-
-        hot_take = analysis.get("hot_take", "")
-        if hot_take:
-            lines.append(f"*Hot Take:* {hot_take}\n")
-
-        skills = analysis.get("skills_radar", [])
-        if skills:
-            lines.append(f"*Skills Radar:* {', '.join(skills)}\n")
-
-        lines.append("─" * 30)
-
-    # ── News items ────────────────────────────────────────
-    lines.append("\n*This Week's Stories:*\n")
-
-    for item in newsletter:
-        title = item.get("title", "Untitled")
-        source = item.get("source", "")
-        summary = item.get("summary", "")
-        url = item.get("url", "")
-        tags = ", ".join(item.get("tags", []))
-
-        lines.append(f"[{title}]({url})")
-        lines.append(f"_{source}_")
-        lines.append(f"{summary}")
-        if tags:
-            lines.append(f"`{tags}`")
-        lines.append("")
-
-    lines.append("─" * 30)
-    lines.append("_AI Pulse | BART + Claude Sonnet | Python_")
-
-    return "\n".join(lines)
+def _item_id(url: str, title: str) -> str:
+    raw = url.strip() if url.strip() else title.strip()
+    return hashlib.md5(raw.encode()).hexdigest()
 
 
 def _send_chunks(text: str, bot_token: str, chat_id: str) -> bool:
-    """Split text into Telegram-safe chunks and send each one."""
-
+    """
+    Split text into Telegram-safe chunks (≤4000 chars) and send each one.
+    Falls back to plain text if Markdown parsing fails.
+    """
     chunks = []
     if len(text) > 4000:
         current_chunk = ""
@@ -97,6 +55,7 @@ def _send_chunks(text: str, bot_token: str, chat_id: str) -> bool:
                 timeout=15,
             )
 
+            # If Markdown fails, retry as plain text
             if resp.status_code != 200:
                 resp = requests.post(
                     url,
@@ -115,10 +74,130 @@ def _send_chunks(text: str, bot_token: str, chat_id: str) -> bool:
                 success = False
 
         except Exception as e:
-            logger.error(f"Telegram error: {e}")
+            logger.error(f"Telegram error on chunk {i+1}: {e}")
             success = False
 
     return success
+
+
+def _send_message_with_buttons(text: str, buttons: list, bot_token: str, chat_id: str) -> bool:
+    """Send a single message with an inline keyboard. buttons = [[{text, callback_data}]]"""
+    url = f"{TELEGRAM_API.format(token=bot_token)}/sendMessage"
+    try:
+        resp = requests.post(
+            url,
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+                "reply_markup": {"inline_keyboard": buttons},
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            # Retry as plain text
+            plain = text.replace("*", "").replace("_", "").replace("`", "")
+            resp = requests.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": plain,
+                    "disable_web_page_preview": True,
+                    "reply_markup": {"inline_keyboard": buttons},
+                },
+                timeout=15,
+            )
+        return resp.status_code == 200
+    except Exception as e:
+        logger.error(f"Telegram button message error: {e}")
+        return False
+
+
+def send_newsletter_with_feedback(
+    newsletter: list,
+    analysis: dict,
+    bot_token: str,
+    chat_id: str,
+) -> bool:
+    """
+    Send weekly digest to Telegram with 👍/👎 buttons on each story.
+
+    Flow:
+    1. Header message (theme, analysis, hot take)
+    2. One message per story with inline 👍/👎 buttons
+       callback_data format: "fb:{item_id}:{+1|-1}"
+    """
+    # Header (analysis section) — no buttons needed
+    header = format_newsletter_header(analysis)
+    _send_chunks(header, bot_token, chat_id)
+
+    success = True
+    for item in newsletter:
+        item_id = _item_id(item.get("url", ""), item.get("title", ""))
+        text = format_item_with_buttons(item)
+        buttons = [[
+            {"text": "👍 Good pick", "callback_data": f"fb:{item_id}:1"},
+            {"text": "👎 Skip next time", "callback_data": f"fb:{item_id}:-1"},
+        ]]
+        if not _send_message_with_buttons(text, buttons, bot_token, chat_id):
+            success = False
+
+    return success
+
+
+def handle_feedback_update(update: dict) -> None:
+    """
+    Process a Telegram callback_query (👍/👎 tap) and write to ChromaDB.
+
+    Telegram sends callback queries to the webhook endpoint. Parse the
+    callback_data ("fb:{item_id}:{score}"), look up the item title from
+    ChromaDB history, and record the preference score.
+
+    Call this from the webhook handler in main.py.
+    """
+    try:
+        callback = update.get("callback_query", {})
+        data = callback.get("data", "")
+        if not data.startswith("fb:"):
+            return
+
+        parts = data.split(":")
+        if len(parts) != 3:
+            return
+
+        _, item_id, score_str = parts
+        score = float(score_str)
+
+        # Look up the title from ChromaDB so we can re-embed it
+        try:
+            from memory.chroma_store import _get_client, record_feedback
+            client = _get_client()
+            if client:
+                import chromadb
+                col = client.get_or_create_collection("content_history")
+                result = col.get(ids=[item_id], include=["documents"])
+                docs = result.get("documents", [[]])
+                title = docs[0] if docs else item_id
+            else:
+                title = item_id
+            record_feedback(item_id, title, score)
+        except Exception as e:
+            logger.error(f"handle_feedback_update: ChromaDB error — {e}")
+
+    except Exception as e:
+        logger.error(f"handle_feedback_update failed: {e}")
+
+
+def send_telegram(
+    newsletter: list,
+    analysis: dict,
+    bot_token: str,
+    chat_id: str,
+) -> bool:
+    """Send weekly newsletter + analysis digest to Telegram."""
+    message = format_newsletter(newsletter, analysis)
+    return _send_chunks(message, bot_token, chat_id)
 
 
 def send_linkedin_drafts_telegram(
@@ -129,70 +208,18 @@ def send_linkedin_drafts_telegram(
 ) -> bool:
     """
     Send generated LinkedIn post drafts to Telegram.
-    Each post is sent as a separate message for easy reading + copy-paste.
+    Each draft is sent as a separate message for easy reading + copy-paste.
     """
-
     if not posts:
         return False
 
-    from datetime import datetime
-    date_str = datetime.now().strftime("%d %b %Y")
-
     # Header message
-    header = f"*AI Pulse — {label}*\n_{date_str} | OpenAI gpt-4o + your Content DNA_\n\nHere are your LinkedIn drafts. Copy-paste what you like:"
-    _send_chunks(header, bot_token, chat_id)
+    _send_chunks(format_linkedin_header(label), bot_token, chat_id)
 
     success = True
     for i, post in enumerate(posts, 1):
-        post_type = post.get("post_type", "unknown").replace("_", " ").title()
-        story = post.get("story_used", "")
-        word_count = post.get("word_count", "?")
-        content = post.get("content", "")
-        changes = post.get("changes_made", "")
-
-        lines = [
-            f"*Post {i} — {post_type}*",
-        ]
-        if story:
-            lines.append(f"_Story: {story}_")
-        lines.append(f"_~{word_count} words_")
-        if changes:
-            lines.append(f"_Changes: {changes}_")
-        lines.append("")
-        lines.append(content)
-        lines.append("")
-        lines.append(f"─ To rewrite: `python main.py --rewrite`")
-
-        post_text = "\n".join(lines)
+        post_text = format_single_draft(post, i)
         if not _send_chunks(post_text, bot_token, chat_id):
             success = False
 
     return success
-
-
-def send_telegram(
-    newsletter: list,
-    analysis: dict,
-    bot_token: str,
-    chat_id: str,
-) -> bool:
-    """Send newsletter + analysis digest to Telegram."""
-
-    message = _format_message(newsletter, analysis)
-
-    # Telegram 4096 char limit — split if needed
-    chunks = []
-    if len(message) > 4000:
-        current_chunk = ""
-        for line in message.split("\n"):
-            if len(current_chunk) + len(line) + 1 > 4000:
-                chunks.append(current_chunk)
-                current_chunk = line
-            else:
-                current_chunk += "\n" + line if current_chunk else line
-        if current_chunk:
-            chunks.append(current_chunk)
-    else:
-        chunks = [message]
-
-    return _send_chunks(message, bot_token, chat_id)

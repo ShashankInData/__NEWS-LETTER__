@@ -3,19 +3,27 @@ AI Pulse — Main Pipeline (v2)
 
 Flow:
   Collect (Reddit, arXiv, HF, Blogs, Twitter)
-  → Filter & Rank
+  → Filter & Rank  (+ ChromaDB novelty/preference enrichment)
   → Summarize (HuggingFace BART — free)
   → Analyze (Claude Sonnet — the brain, opinions + implications)
-  → Deliver (Email + Telegram)
+  → Deliver (Email + Telegram with 👍/👎 feedback buttons)
+  → Store items in ChromaDB for next-run memory
 
 LinkedIn Flow (on-demand):
   python main.py --linkedin          → generate 2 fresh posts from latest stories
   python main.py --rewrite           → rewrite a post interactively with feedback
 
+Feedback webhook:
+  python main.py --webhook           → start lightweight HTTP server that receives
+                                       Telegram callback queries (👍/👎 taps) and
+                                       writes preference scores to ChromaDB
+
 Cost model:
   - Summarization: FREE (HuggingFace Inference API)
   - Analysis: ~$0.10-0.20 per run (Claude Sonnet)
   - LinkedIn drafts: ~$0.02-0.05 per run (OpenAI gpt-4o)
+  - Embeddings: FREE (sentence-transformers, runs locally)
+  - Memory/ChromaDB: FREE (local persistent storage)
   - Everything else: free
 """
 
@@ -35,7 +43,12 @@ from processing.hf_summarizer import summarize_all_items
 from processing.analyst import generate_analysis
 from processing.linkedin_drafter import generate_drafts, rewrite_post, save_drafts_to_file
 from delivery.email_sender import send_email
-from delivery.telegram_bot import send_telegram, send_linkedin_drafts_telegram
+from delivery.telegram_bot import (
+    send_telegram,
+    send_newsletter_with_feedback,
+    send_linkedin_drafts_telegram,
+    handle_feedback_update,
+)
 
 # Setup logging
 logging.basicConfig(
@@ -117,19 +130,35 @@ def run_pipeline():
     else:
         logger.warning("Email: skipped (missing SMTP config)")
 
-    # Telegram
+    # Telegram — send with 👍/👎 feedback buttons if webhook is configured
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL")
 
     if tg_token and tg_chat_id:
-        send_telegram(
-            newsletter=summarized,
-            analysis=analysis,
-            bot_token=tg_token,
-            chat_id=tg_chat_id,
-        )
+        if webhook_url:
+            send_newsletter_with_feedback(
+                newsletter=summarized,
+                analysis=analysis,
+                bot_token=tg_token,
+                chat_id=tg_chat_id,
+            )
+        else:
+            send_telegram(
+                newsletter=summarized,
+                analysis=analysis,
+                bot_token=tg_token,
+                chat_id=tg_chat_id,
+            )
     else:
         logger.warning("Telegram: skipped (missing config)")
+
+    # Store items in ChromaDB for next-run novelty + preference enrichment
+    try:
+        from memory.chroma_store import store_items
+        store_items(summarized)
+    except Exception as e:
+        logger.warning(f"Memory: store_items skipped — {e}")
 
     logger.info("=" * 60)
     logger.info("AI Pulse v2 — Pipeline complete")
@@ -146,13 +175,7 @@ def _collect_and_summarize(config: dict) -> list:
     # Reddit
     reddit_config = config.get("sources", {}).get("reddit", {})
     if reddit_config:
-        reddit_config.update({
-            "client_id": os.getenv("REDDIT_CLIENT_ID"),
-            "client_secret": os.getenv("REDDIT_CLIENT_SECRET"),
-            "user_agent": os.getenv("REDDIT_USER_AGENT", "ai-pulse:v1.0"),
-        })
-        if reddit_config.get("client_id"):
-            all_items.extend(RedditCollector(reddit_config, topic_tags).collect())
+        all_items.extend(RedditCollector(reddit_config, topic_tags).collect())
 
     # arXiv
     arxiv_config = config.get("sources", {}).get("arxiv", {})
@@ -308,6 +331,67 @@ def run_rewrite_mode():
         print("Sent to Telegram.")
 
 
+def run_webhook_server():
+    """
+    Lightweight HTTP server that receives Telegram callback queries (👍/👎)
+    and writes preference scores to ChromaDB.
+
+    Setup:
+      1. Expose this server to the internet (e.g. ngrok, a VPS, or any tunnel)
+      2. Set TELEGRAM_WEBHOOK_URL=https://your-domain/webhook in .env
+      3. Register the webhook with Telegram once:
+           python main.py --set-webhook
+      4. Run: python main.py --webhook  (keep this running alongside your scheduler)
+
+    Telegram will POST every update (including callback_query) to /webhook.
+    """
+    import json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    load_dotenv()
+    port = int(os.getenv("WEBHOOK_PORT", 8443))
+
+    class WebhookHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != "/webhook":
+                self.send_response(404)
+                self.end_headers()
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                update = json.loads(body)
+                handle_feedback_update(update)
+            except Exception as e:
+                logger.error(f"Webhook: failed to process update — {e}")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):  # silence default access logs
+            pass
+
+    logger.info(f"Webhook server listening on port {port} at /webhook")
+    HTTPServer(("0.0.0.0", port), WebhookHandler).serve_forever()
+
+
+def set_telegram_webhook():
+    """Register the webhook URL with Telegram. Run once after deployment."""
+    import requests as req
+    load_dotenv()
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    url = os.getenv("TELEGRAM_WEBHOOK_URL")
+    if not token or not url:
+        logger.error("TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_URL must be set in .env")
+        return
+    webhook_endpoint = f"{url.rstrip('/')}/webhook"
+    resp = req.post(
+        f"https://api.telegram.org/bot{token}/setWebhook",
+        json={"url": webhook_endpoint},
+    )
+    logger.info(f"setWebhook response: {resp.json()}")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
 
@@ -315,5 +399,9 @@ if __name__ == "__main__":
         run_linkedin_pipeline()
     elif "--rewrite" in args:
         run_rewrite_mode()
+    elif "--webhook" in args:
+        run_webhook_server()
+    elif "--set-webhook" in args:
+        set_telegram_webhook()
     else:
         run_pipeline()

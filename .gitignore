@@ -9,6 +9,9 @@ env/
 # Output drafts (personal content)
 output/
 
+# ChromaDB — local persistent memory, personal to each user
+memory/db/
+
 # Python
 __pycache__/
 *.py[cod]

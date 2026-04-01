@@ -1,283 +1,187 @@
-# AI Pulse — Personal AI/ML Newsletter & LinkedIn Draft Automation
+# AI Pulse — Project Plan & Build Log
 
-## What This Does
-A Python automation that runs weekly (or daily) to:
-1. **Scrape** trending AI/ML content from Reddit, Twitter/X, arXiv, HuggingFace, and tech blogs
-2. **Filter** by your topic tags (RAG, fine-tuning, agents, benchmarks, new models, etc.)
-3. **Summarize** into a clean newsletter digest
-4. **Email** it to you
-5. **Send** it to your Telegram
-6. **Optionally** generate a LinkedIn post draft in your voice (Content DNA)
-7. Runs on a server — laptop off, still works
+## What This Is
+
+A personal AI/ML newsletter automation pipeline. Runs weekly to collect, filter, summarise, and deliver trending AI content — then learns your taste over time via 👍/👎 feedback.
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   CRON (weekly/daily)                │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│              SCRAPER LAYER (collectors)              │
-│                                                     │
-│  ┌───────────┐ ┌──────────┐ ┌────────────────────┐ │
-│  │  Reddit    │ │ Twitter  │ │ arXiv / HF Papers  │ │
-│  │  (PRAW)   │ │ (Apify / │ │ (RSS / API)        │ │
-│  │           │ │  RSS)    │ │                    │ │
-│  └───────────┘ └──────────┘ └────────────────────┘ │
-│  ┌───────────────────────────────────────────────┐  │
-│  │  Tech Blogs (OpenAI, Anthropic, DeepMind)     │  │
-│  │  (RSS feeds / web scraping)                   │  │
-│  └───────────────────────────────────────────────┘  │
-└──────────────────────┬──────────────────────────────┘
-                       │ raw posts/articles
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│              FILTER & RANK                          │
-│  - Match against your topic tags                    │
-│  - Deduplicate                                      │
-│  - Rank by engagement / relevance                   │
-└──────────────────────┬──────────────────────────────┘
-                       │ filtered content
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│              SUMMARIZER (Claude Haiku)               │
-│  - Per-item summary (2-3 sentences)                 │
-│  - Newsletter assembly (grouped by category)        │
-└──────────┬───────────────────────┬──────────────────┘
-           │                       │
-           ▼                       ▼
-┌──────────────────┐   ┌─────────────────────────────┐
-│  EMAIL (SMTP)    │   │  TELEGRAM BOT               │
-│  - HTML digest   │   │  - Formatted digest message  │
-│  - To your inbox │   │  - To your chat             │
-└──────────────────┘   └─────────────────────────────┘
-                       │
-                       ▼ (optional, on-demand)
-┌─────────────────────────────────────────────────────┐
-│     LINKEDIN DRAFT GENERATOR (Claude Sonnet)        │
-│  - Uses your Content DNA prompt                     │
-│  - Generates 1-2 post drafts                        │
-│  - Sent via Telegram for review                     │
-│  - You copy-paste manually to LinkedIn              │
-└─────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────────────┐
+│                    SCHEDULER (APScheduler)                    │
+│         Newsletter: Sunday 9am  |  LinkedIn: Wednesday 10am  │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     COLLECT (collectors/)                     │
+│                                                              │
+│  Reddit (RSS)  │  Twitter/X (Apify)  │  arXiv  │  HF Papers │
+│                       Tech Blogs (RSS)                       │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ raw items
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│               FILTER & RANK (processing/)                    │
+│                                                              │
+│  1. Deduplicate (URL + title)                                │
+│  2. Enrich with ChromaDB memory:                             │
+│       novelty_score  — how similar to past content?          │
+│       pref_score     — how similar to 👍'd content?          │
+│  3. Composite score:                                         │
+│       topic tags × 10  +  engagement  +  novelty × 8        │
+│       +  preference × 12                                     │
+│  4. Source diversity cap (no single source > 1/3 of slots)   │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ top 15 items
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│              SUMMARISE (processing/hf_summarizer.py)         │
+│  HuggingFace BART (facebook/bart-large-cnn) — free           │
+│  Falls back to extractive summary if API is down             │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ summarised items
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│               ANALYSE (processing/analyst.py)                │
+│  Claude Sonnet — the expensive call, used once per run       │
+│  Outputs: weekly theme, connections, implications,           │
+│           hot take, skills radar                             │
+└──────────┬────────────────────────────────┬─────────────────┘
+           │                                │
+           ▼                                ▼
+┌────────────────────┐          ┌───────────────────────────┐
+│  EMAIL (SMTP)      │          │  TELEGRAM                 │
+│  HTML digest       │          │  Per-story messages with  │
+│  Jinja2 template   │          │  👍/👎 inline buttons     │
+└────────────────────┘          └───────────────┬───────────┘
+                                                │ button tap
+                                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│                  LEARN (memory/chroma_store.py)               │
+│  Telegram callback → webhook server (main.py --webhook)      │
+│  record_feedback(item_id, score=+1/-1)                       │
+│  ChromaDB + sentence-transformers (all-MiniLM-L6-v2)         │
+│  Persists locally in memory/db/ — never wiped                │
+└──────────────────────────────────────────────────────────────┘
+
+On-demand LinkedIn flow:
+Collect → Rank → Summarise → GPT-4o drafts → Telegram + output/
 ```
 
 ---
 
 ## Tech Stack
 
-| Component         | Tool                              | Cost          |
-|--------------------|-----------------------------------|---------------|
-| Language           | Python 3.11+                      | Free          |
-| Reddit scraping    | PRAW (Reddit API)                 | Free          |
-| Twitter/X scraping | Option A: Apify Twitter Scraper   | ~$5/mo        |
-|                    | Option B: Nitter RSS (free, fragile) | Free       |
-|                    | Option C: socialdata.tools API    | Pay-per-call  |
-| arXiv              | arxiv Python package / RSS        | Free          |
-| HuggingFace Papers | HF Daily Papers API / RSS         | Free          |
-| Tech Blogs         | RSS feeds (feedparser)            | Free          |
-| Summarization      | Claude Haiku via Anthropic API    | ~$0.10/run    |
-| LinkedIn drafts    | Claude Sonnet via Anthropic API   | ~$0.15/run    |
-| Email              | SMTP (Gmail App Password or Resend) | Free       |
-| Telegram           | python-telegram-bot               | Free          |
-| Scheduling         | APScheduler or system cron        | Free          |
-| Hosting            | Railway / Render / Hetzner VPS    | $0-7/mo       |
-| Config             | .env + YAML for topic tags        | Free          |
+| Component | Tool | Cost |
+| --------- | ---- | ---- |
+| Reddit | Public RSS (feedparser) | Free |
+| arXiv | arxiv Python package | Free |
+| HuggingFace papers | HF Daily Papers API | Free |
+| Tech blogs | RSS (feedparser) | Free |
+| Twitter/X | Apify pay-per-result | ~$0.25/1K tweets |
+| Summarisation | HuggingFace BART (inference API) | Free |
+| Analysis | Claude Sonnet (Anthropic) | ~$0.10–0.20/run |
+| LinkedIn drafts | OpenAI GPT-4o | ~$0.01–0.03/run |
+| Embeddings | sentence-transformers (local) | Free |
+| Memory | ChromaDB (local persistent) | Free |
+| Email | SMTP / Gmail App Password | Free |
+| Telegram | python-telegram-bot + webhook | Free |
+| Scheduling | APScheduler | Free |
 
-**Estimated total cost: $5-12/month** (mostly Apify if you use it for Twitter)
+**Estimated total: ~$1–3/month** at weekly cadence.
 
 ---
 
-## Project Structure
+## File Map
 
-```
-ai-pulse/
-├── config/
-│   ├── settings.yaml          # Topic tags, source configs, schedule
-│   └── content_dna.yaml       # Your writing voice profile for LinkedIn drafts
-├── collectors/
-│   ├── __init__.py
-│   ├── base.py                # Abstract base collector
-│   ├── reddit.py              # PRAW-based Reddit collector
-│   ├── twitter.py             # Twitter/X collector (Apify or RSS)
-│   ├── arxiv_hf.py            # arXiv + HuggingFace papers
-│   └── tech_blogs.py          # RSS feed collector for company blogs
-├── processing/
-│   ├── __init__.py
-│   ├── filter.py              # Topic matching & deduplication
-│   ├── ranker.py              # Engagement/relevance ranking
-│   └── summarizer.py          # Claude Haiku summarization
-├── delivery/
-│   ├── __init__.py
-│   ├── email_sender.py        # SMTP email with HTML template
-│   ├── telegram_bot.py        # Telegram delivery + command handling
-│   └── linkedin_drafter.py    # Claude Sonnet LinkedIn post generator
-├── templates/
-│   ├── newsletter_email.html  # HTML email template
-│   └── telegram_format.py     # Telegram message formatter
-├── main.py                    # Entry point — orchestrates the pipeline
-├── scheduler.py               # APScheduler setup for cron-like runs
-├── requirements.txt
-├── .env.example               # API keys template
-├── Dockerfile                 # For deployment
-└── README.md
-```
+```text
+collectors/
+  base.py           ContentItem dataclass + BaseCollector ABC
+  reddit.py         Reddit RSS (no API key — feedparser)
+  arxiv_hf.py       arXiv API + HuggingFace daily papers
+  tech_blogs.py     RSS feeds for OpenAI, Anthropic, Google AI, Meta, Mistral
+  twitter.py        Apify actor (kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest)
+                    Fallback: Nitter RSS
 
----
+processing/
+  filter.py         Entry point: dedup → enrich (ChromaDB) → rank
+  ranker.py         Composite scoring + source diversity
+  hf_summarizer.py  HF BART summarisation + extractive fallback
+  analyst.py        Claude Sonnet analysis (one call per run)
+  linkedin_drafter.py  GPT-4o post generation using content_dna.yaml
 
-## Configuration (settings.yaml)
+delivery/
+  email_sender.py   SMTP HTML email
+  telegram_bot.py   Delivery + send_newsletter_with_feedback() + handle_feedback_update()
 
-```yaml
-# Topic tags — content must match at least one to be included
-topic_tags:
-  - LLM fine-tuning
-  - RAG applications
-  - multi-agent systems
-  - new model releases
-  - benchmarks
-  - prompt engineering
-  - computer vision
-  - LangChain
-  - LangGraph
-  - CrewAI
-  - open source models
-  - AI agents
-  - MLOps
-  - vector databases
+memory/
+  chroma_store.py   store_items(), get_novelty_and_preference(), record_feedback()
+  db/               ChromaDB persistent storage (gitignored — personal to each user)
 
-# Sources
-sources:
-  reddit:
-    subreddits:
-      - MachineLearning
-      - LocalLLaMA
-      - artificial
-      - deeplearning
-      - LangChain
-    top_n: 20  # top posts to fetch per subreddit
-    time_filter: week  # day, week, month
+templates/
+  newsletter_email.html   HTML email template (Jinja2)
+  telegram_format.py      format_newsletter(), format_newsletter_header(),
+                          format_item_with_buttons(), format_single_draft()
 
-  twitter:
-    method: apify  # apify | nitter_rss
-    accounts:
-      - "@kaborepat"
-      - "@ylecun"
-      - "@AndrewYNg"
-      - "@sama"
-      - "@ClementDelworAI"
-      - "@_jasonwei"
-      - "@hardmaru"
-      # Add your own follows
-    search_terms:
-      - "LLM fine-tuning"
-      - "RAG pipeline"
-      - "new AI model"
+config/
+  settings.yaml     Topic tags, source configs, cron schedule
+  content_dna.yaml  Personal writing voice profile (persona, tone, structure, language)
 
-  arxiv:
-    categories:
-      - cs.AI
-      - cs.CL
-      - cs.LG
-      - cs.CV
-    max_results: 30
-
-  huggingface:
-    daily_papers: true
-
-  tech_blogs:
-    rss_feeds:
-      - https://openai.com/blog/rss.xml
-      - https://www.anthropic.com/research/rss.xml
-      - https://blog.google/technology/ai/rss/
-      - https://ai.meta.com/blog/rss/
-      - https://mistral.ai/feed.xml
-
-# Delivery
-delivery:
-  email:
-    to: "your-email@gmail.com"
-    from: "your-sender@gmail.com"
-  telegram:
-    chat_id: "your-chat-id"
-
-# Schedule
-schedule:
-  newsletter: "every sunday 9am"
-  linkedin_draft: "every wednesday 10am"
+main.py             Entry point — run_pipeline(), run_linkedin_pipeline(),
+                    run_rewrite_mode(), run_webhook_server(), set_telegram_webhook()
+scheduler.py        APScheduler cron runner
+app.py              Gradio UI (run locally or deploy to Railway alongside pipeline)
 ```
 
 ---
 
-## Prerequisites — What You Need Before Coding
-
-### Accounts & API Keys (get these first)
-1. **Anthropic API key** — you likely have this already
-2. **Reddit API credentials** — go to reddit.com/prefs/apps, create a "script" app, get client_id + client_secret
-3. **Twitter/X scraping** — sign up for Apify free tier (or find Nitter RSS endpoints)
-4. **Telegram Bot** — message @BotFather on Telegram, create bot, get token, get your chat_id
-5. **Email SMTP** — Gmail App Password (Settings > 2FA > App Passwords) or sign up for Resend (free tier)
-6. **Hosting account** — Railway.app (free tier with $5 credit) or Render.com (free tier)
-
-### Local Setup
-```bash
-mkdir ai-pulse && cd ai-pulse
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install praw feedparser arxiv anthropic python-telegram-bot apscheduler jinja2 pyyaml python-dotenv requests
-```
-
----
-
-## Build Order (Phase by Phase)
-
-### Phase 1: Reddit + arXiv collector → Summarize → Email (Week 1)
-- Get Reddit and arXiv scraping working
-- Filter by topic tags
-- Summarize with Claude Haiku
-- Send email digest
-- **This alone is useful. Ship it.**
-
-### Phase 2: Add Telegram delivery (Week 1-2)
-- Set up Telegram bot
-- Format and send digest via Telegram
-- Add `/digest` command to trigger on-demand
-
-### Phase 3: Add Twitter + Tech Blogs (Week 2)
-- Integrate Apify or Nitter RSS for Twitter
-- Add RSS parsing for tech blogs
-- Merge all sources into unified pipeline
-
-### Phase 4: LinkedIn draft generator (Week 3)
-- Create Content DNA prompt template
-- Generate 1-2 LinkedIn post drafts per week
-- Send drafts to Telegram for review
-- You copy-paste to LinkedIn
-
-### Phase 5: Deploy & schedule (Week 3)
-- Dockerize
-- Deploy to Railway/Render
-- Set up cron schedule
-- Test end-to-end
-
-### Phase 6 (Future): Jarvis expansion
-- Add job alert agents
-- Add more Telegram commands
-- Add content publishing automation
-- This becomes your Jarvis foundation
-
----
-
-## Key Decisions Made
+## Key Decisions
 
 | Decision | Choice | Reason |
-|----------|--------|--------|
-| Build approach | Python code, not n8n/Make | Portfolio value, full control, you know the stack |
-| Twitter scraping | Start with Apify, fallback to Nitter RSS | Official API too expensive, Apify is reliable |
-| LinkedIn posting | Manual copy-paste from drafts | No personal profile API, automation risks account ban |
-| LLM | Claude Haiku (summaries) + Sonnet (drafts) | Cost-optimized, you know the API |
-| Hosting | Railway or Render free tier | Always-on, no laptop dependency, free to start |
-| Newsletter delivery | Email + Telegram both | You asked for both |
+| -------- | ------ | ------ |
+| Reddit scraping | Public RSS via feedparser | No API key needed, PRAW requires OAuth |
+| Twitter | Apify pay-per-result | Official API too expensive; Nitter RSS as free fallback |
+| Summarisation model | HF BART (free inference API) | Saves LLM tokens for actual reasoning |
+| Analysis LLM | Claude Sonnet | One call per run — quality over cost |
+| LinkedIn drafts LLM | OpenAI GPT-4o | Separate concern, good instruction following |
+| Memory/ranking | ChromaDB + sentence-transformers | Local, free, persistent, no external service |
+| Feedback mechanism | Telegram inline buttons + webhook | Natural in-flow — no separate UI needed |
+| Deployment | Railway (persistent VPS-like) | Scheduler + webhook need always-on process + stable URL |
+| LinkedIn publishing | Manual copy-paste | No personal profile API; automation risks account ban |
+
+---
+
+## Build Phases (completed)
+
+### Phase 1 — Core pipeline
+
+Reddit (PRAW → switched to RSS) + arXiv + HF papers + Tech blogs → filter → HF BART summarise → Claude Sonnet analyse → Email + Telegram deliver
+
+### Phase 2 — Twitter/X
+
+Apify integration with `kaitoeasyapi` actor. Nitter RSS fallback available via `settings.yaml`.
+
+### Phase 3 — LinkedIn draft generator
+
+GPT-4o + `content_dna.yaml` persona profile. Three post types: hot take, project showcase, geopolitical analysis. Interactive rewrite mode (`--rewrite`).
+
+### Phase 4 — Memory & personalisation
+
+ChromaDB + sentence-transformers (`all-MiniLM-L6-v2`, runs locally). Two collections:
+
+- `content_history` — embeddings of all past items for novelty scoring
+- `preferences` — 👍/👎 signals for preference scoring
+
+Ranker incorporates both. Webhook server receives Telegram callback queries and writes to ChromaDB.
+
+---
+
+## What's Next (possible)
+
+- **Railway deployment** — permanent URL solves the ngrok-per-session problem for the webhook
+- **Gradio UI** (`app.py` exists) — on-demand pipeline trigger + memory stats viewer, runs on Railway alongside the scheduler
+- **Email HTML polish** — the template works but could be improved visually
+- **More sources** — newsletters (Substack RSS), YouTube transcripts, podcasts

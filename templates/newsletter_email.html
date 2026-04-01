@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Pulse — {{ now }}</title>
+</head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:680px;margin:0 auto;padding:20px;background:#ffffff;">
+
+  {# ── Header ─────────────────────────────────────────────── #}
+  <div style="text-align:center;padding:30px 0;border-bottom:3px solid #0f3460;">
+    <h1 style="color:#0f3460;margin:0;font-size:28px;">&#9889; AI Pulse</h1>
+    <p style="color:#888;margin:8px 0 0;">Your Weekly AI/ML Digest — {{ now }}</p>
+  </div>
+
+  {# ── Analysis Section (Claude Sonnet's take) ─────────────── #}
+  {% if analysis %}
+  <div style="margin:30px 0;padding:24px;background:linear-gradient(135deg,#0f3460,#1a1a2e);color:#fff;border-radius:12px;">
+    <h2 style="color:#e94560;margin:0 0 4px;font-size:20px;">&#129504; The Brain's Take</h2>
+    <p style="color:#ccc;font-size:13px;margin:0 0 16px;">AI-powered analysis — connecting the dots</p>
+
+    {% if analysis.weekly_theme %}
+    <div style="background:rgba(255,255,255,0.08);padding:16px;border-radius:8px;margin-bottom:16px;">
+      <strong style="color:#e94560;">This Week's Theme:</strong>
+      <p style="color:#fff;font-size:15px;margin:8px 0 0;line-height:1.5;">{{ analysis.weekly_theme }}</p>
+    </div>
+    {% endif %}
+
+    {% if analysis.connections %}
+    <div style="background:rgba(255,255,255,0.05);padding:16px;border-radius:8px;margin-bottom:16px;">
+      <strong style="color:#e94560;">How It All Connects:</strong>
+      <p style="color:#ddd;font-size:14px;margin:8px 0 0;line-height:1.6;">{{ analysis.connections | replace('\n', '<br>') }}</p>
+    </div>
+    {% endif %}
+  </div>
+
+  {# ── Implications ───────────────────────────────────────── #}
+  {% if analysis.implications %}
+  <div style="margin:20px 0;">
+    <h2 style="color:#0f3460;font-size:20px;border-bottom:2px solid #e94560;padding-bottom:8px;">Implications</h2>
+    {% set impl = analysis.implications %}
+    {% if impl.industry %}
+    <div style="margin-bottom:12px;">
+      <strong style="color:#0f3460;">&#127970; Industry:</strong>
+      <span style="color:#333;font-size:14px;"> {{ impl.industry }}</span>
+    </div>
+    {% endif %}
+    {% if impl.economic %}
+    <div style="margin-bottom:12px;">
+      <strong style="color:#0f3460;">&#128200; Economic:</strong>
+      <span style="color:#333;font-size:14px;"> {{ impl.economic }}</span>
+    </div>
+    {% endif %}
+    {% if impl.geopolitical %}
+    <div style="margin-bottom:12px;">
+      <strong style="color:#0f3460;">&#127758; Geopolitical:</strong>
+      <span style="color:#333;font-size:14px;"> {{ impl.geopolitical }}</span>
+    </div>
+    {% endif %}
+    {% if impl.for_builders %}
+    <div style="margin-bottom:12px;">
+      <strong style="color:#0f3460;">&#128295; For Builders:</strong>
+      <span style="color:#333;font-size:14px;"> {{ impl.for_builders }}</span>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# ── Deep Dives ─────────────────────────────────────────── #}
+  {% if analysis.analysis_sections %}
+  <div style="margin:20px 0;">
+    <h2 style="color:#0f3460;font-size:20px;border-bottom:2px solid #e94560;padding-bottom:8px;">Deep Dives</h2>
+    {% for section in analysis.analysis_sections %}
+    <div style="margin-bottom:20px;">
+      <h3 style="color:#0f3460;margin:0 0 8px;">{{ section.heading }}</h3>
+      <p style="color:#333;font-size:14px;line-height:1.6;margin:0;">{{ section.body | replace('\n', '<br>') }}</p>
+      {% if section.relevance %}
+      <p style="color:#e94560;font-size:13px;font-style:italic;margin:8px 0 0;">&#128073; {{ section.relevance }}</p>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# ── Hot Take ───────────────────────────────────────────── #}
+  {% if analysis.hot_take %}
+  <div style="background:#fff3cd;padding:16px;border-radius:8px;border-left:4px solid #e94560;margin:20px 0;">
+    <strong style="color:#0f3460;">Hot Take:</strong>
+    <p style="color:#333;font-size:14px;margin:8px 0 0;line-height:1.5;">{{ analysis.hot_take }}</p>
+  </div>
+  {% endif %}
+
+  {# ── Skills Radar ───────────────────────────────────────── #}
+  {% if analysis.skills_radar %}
+  <div style="margin-top:16px;">
+    <strong style="color:#0f3460;">&#128225; Skills Radar:</strong><br>
+    <div style="margin-top:8px;">
+      {% for skill in analysis.skills_radar %}
+      <span style="background:#0f3460;color:#fff;padding:4px 12px;border-radius:16px;font-size:13px;margin-right:6px;display:inline-block;margin-bottom:6px;">{{ skill }}</span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% endif %}{# end analysis #}
+
+  {# ── News Items ─────────────────────────────────────────── #}
+  <div style="margin:30px 0;">
+    <h2 style="color:#0f3460;font-size:20px;border-bottom:2px solid #e94560;padding-bottom:8px;">This Week's Stories</h2>
+
+    {% for item in newsletter %}
+    <div style="margin-bottom:16px;padding:16px;background:#f8f9fa;border-radius:8px;border-left:4px solid #0f3460;">
+      <a href="{{ item.url }}" style="color:#0f3460;text-decoration:none;font-weight:600;font-size:15px;">
+        {{ item.title }}
+      </a>
+      <div style="color:#888;font-size:12px;margin:4px 0;">{{ item.source }}</div>
+      <p style="color:#333;font-size:14px;line-height:1.5;margin:8px 0;">
+        {{ item.summary }}
+      </p>
+      <div>
+        {% for tag in item.tags %}
+        <span style="background:#1a1a2e;color:#e94560;padding:2px 8px;border-radius:12px;font-size:12px;margin-right:4px;display:inline-block;">{{ tag }}</span>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# ── Footer ─────────────────────────────────────────────── #}
+  <div style="text-align:center;padding:20px;color:#888;font-size:13px;border-top:1px solid #eee;">
+    AI Pulse — Summaries by BART | Analysis by Claude Sonnet | Pipeline by Python<br>
+    Built by Shashank Bodapati
+  </div>
+
+</body>
+</html>
