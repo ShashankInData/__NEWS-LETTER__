@@ -1,0 +1,84 @@
+topic_tags:
+  - LLM fine-tuning
+  - RAG
+  - multi-agent systems
+  - new model releases
+  - benchmarks
+  - prompt engineering
+  - computer vision
+  - LangChain
+  - LangGraph
+  - CrewAI
+  - open source models
+  - AI agents
+  - MLOps
+  - vector databases
+  - YOLO
+  - transformer architecture
+
+sources:
+  reddit:
+    subreddits:
+      - MachineLearning
+      - LocalLLaMA
+      - artificial
+      - deeplearning
+      - LangChain
+    top_n: 20
+    time_filter: week
+
+  twitter:
+    method: apify  # apify | nitter_rss
+    accounts:
+      - kaborepat
+      - ylecun
+      - AndrewYNg
+      - sama
+      - ClementDelworAI
+      - _jasonwei
+      - hardmaru
+      - AravSrinivas
+      - emaborevich
+    search_terms:
+      - "LLM fine-tuning"
+      - "RAG pipeline"
+      - "new AI model"
+      - "open source LLM"
+      - "AI agents"
+
+  arxiv:
+    categories:
+      - cs.AI
+      - cs.CL
+      - cs.LG
+      - cs.CV
+    max_results: 30
+
+  huggingface:
+    daily_papers: true
+
+  tech_blogs:
+    rss_feeds:
+      - https://openai.com/blog/rss.xml
+      - https://www.anthropic.com/research/rss.xml
+      - https://blog.google/technology/ai/rss/
+      - https://ai.meta.com/blog/rss/
+      - https://mistral.ai/feed.xml
+
+delivery:
+  email:
+    to: "${EMAIL_TO}"
+  telegram:
+    chat_id: "${TELEGRAM_CHAT_ID}"
+
+schedule:
+  newsletter_cron: "0 9 * * 0"      # Every Sunday 9am UTC
+  linkedin_draft_cron: "0 10 * * 3"  # Every Wednesday 10am UTC
+
+newsletter:
+  max_items: 15
+  summary_length: "2-3 sentences per item"
+
+linkedin_draft:
+  posts_per_run: 2
+  content_dna_path: "config/content_dna.yaml"
